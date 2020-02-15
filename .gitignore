@@ -1,0 +1,4 @@
+.vscode
+test
+*.o
+info.plist

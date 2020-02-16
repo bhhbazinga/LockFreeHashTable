@@ -20,8 +20,18 @@ int main(int argc, char const* argv[]) {
   assert(ht.bucket_size() == 4);
   ht.Dump();
   ht.Insert(3, 3);
-  assert(ht.bucket_size() == 8);
   ht.Dump();
+  assert(ht.bucket_size() == 8);
+  ht.Insert(4, 4);
+  ht.Dump();
+  // assert(ht.bucket_size() == 8);
+
+
+  // ht.Insert(5, 5);
+  // assert(ht.bucket_size() == 16);
+  // ht.Insert(6, 6);
+  // assert(ht.bucket_size() == 16);
+  // ht.Dump();
 
   // ht.Insert("d", 4);
   // ht.Insert("e", 5);
@@ -34,8 +44,13 @@ int main(int argc, char const* argv[]) {
   // assert(ht.Find("e", x) && x == 5);
 
   // ht.Delete(2);
-  ht.Find(2, x);
+  // assert(ht.Find(1, x) && x == 1);
+  bool flag = ht.Find(2, x);
   ht.Dump();
+  assert(flag);
+  // assert(x == 2);
+
+  // ht.Dump();
   // assert(ht.size() == 4);
   // assert(!ht.Find("a", x));
   // assert(ht.Find("b", x) && x == 2);

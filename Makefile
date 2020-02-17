@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -Wall -Wextra -pedantic -std=c++2a -g -fsanitize=thread
+CXXFLAGS = -Wall -Wextra -pedantic -std=c++2a -g -o3
 #-fsanitize=address -fsanitize=leak
 #-fsanitize=thread
 EXEC = test

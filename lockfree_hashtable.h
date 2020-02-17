@@ -163,7 +163,7 @@ class LockFreeHashTable {
   bool FindNode(DummyNode* head, RegularNode* find_node, V& value) {
     Node* prev;
     Node* cur;
-    bool found = SearchNode(head, find_node, &prev, &cur, true);
+    bool found = SearchNode(head, find_node, &prev, &cur);
     if (found) {
       value = *static_cast<RegularNode*>(cur)->value.load(
           std::memory_order_acquire);
@@ -172,11 +172,10 @@ class LockFreeHashTable {
     return found;
   }
 
-  // Traverse list begin with head until encounter a dummy node(regular is
-  // true) or nullptr(regular is false) or the first node which is greater
-  // than or equals to the given search_node.
+  // Traverse list begin with head until encounter nullptr or the first node
+  // which is greater than or equals to the given search_node.
   bool SearchNode(DummyNode* head, Node* search_node, Node** prev_ptr,
-                  Node** cur_ptr, bool regular);
+                  Node** cur_ptr);
 
   // Compare two nodes according to their reverse_hash and the key.
   bool Less(Node* node1, Node* node2) const {
@@ -186,6 +185,7 @@ class LockFreeHashTable {
 
     if (node1->IsDummy() || node2->IsDummy()) {
       // When initialize bucket currently, that could happen.
+      assert(node1->IsDummy() && node2->IsDummy());
       return false;
     }
 
@@ -391,11 +391,15 @@ LockFreeHashTable<K, V, Hash>::InitializeBucket(BucketIndex bucket_index) {
     // Try allocate dummy head.
     head = new DummyNode(bucket_index);
     DummyNode* real_head;  // If insert failed, real_head is the head of bucket.
+    assert((parent_head->reverse_hash & 0x1) == 0);
     if (InsertDummyNode(parent_head, head, &real_head)) {
-      // Dummy head must be inserted into the list before storing bucket.
+      // Dummy head must be inserted into the list before storing into bucket.
+      assert(bucket.load(std::memory_order_acquire) == nullptr);
       bucket.store(head, std::memory_order_release);
     } else {
       delete head;
+      assert((real_head->reverse_hash & 0x1) == 0);
+      assert(bucket_index == real_head->hash);
       head = real_head;
     }
   }
@@ -429,8 +433,9 @@ bool LockFreeHashTable<K, V, Hash>::InsertDummyNode(DummyNode* parent_head,
   Node* prev;
   Node* cur;
   do {
-    if (SearchNode(parent_head, new_head, &prev, &cur, false)) {
+    if (SearchNode(parent_head, new_head, &prev, &cur)) {
       // The head of bucket already insert into list.
+      assert((cur->reverse_hash & 0x1) == 0);
       *real_head = static_cast<DummyNode*>(cur);
       ClearHazardPointer();
       return false;
@@ -447,8 +452,11 @@ void LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
                                                       RegularNode* new_node) {
   Node* prev;
   Node* cur;
+  assert((head->reverse_hash & 0x1) == 0);
   do {
-    if (SearchNode(head, new_node, &prev, &cur, true)) {
+    if (SearchNode(head, new_node, &prev, &cur)) {
+      assert(!(new_node->reverse_hash & 0x1) == 0);
+      assert(!(cur->reverse_hash & 0x1) == 0);
       V* new_value = new_node->value.load(std::memory_order_acquire);
       V* old_value = static_cast<RegularNode*>(cur)->value.exchange(
           new_value, std::memory_order_release);
@@ -463,6 +471,13 @@ void LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
       cur, new_node, std::memory_order_release, std::memory_order_acquire));
   ClearHazardPointer();
 
+  if (size_ == 5) {
+    head->Dump();
+    new_node->Dump();
+    Dump();
+    assert(false);
+  }
+
   size_t size = size_.fetch_add(1, std::memory_order_release) + 1;
   size_t power = power_of_2_.load(std::memory_order_acquire);
   if ((1 << power) * kLoadFactor < size) {
@@ -474,8 +489,8 @@ void LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
 template <typename K, typename V, typename Hash>
 bool LockFreeHashTable<K, V, Hash>::SearchNode(DummyNode* head,
                                                Node* search_node,
-                                               Node** prev_ptr, Node** cur_ptr,
-                                               bool regular) {
+                                               Node** prev_ptr,
+                                               Node** cur_ptr) {
   Reclaimer& reclaimer = Reclaimer::GetInstance();
 try_again:
   Node* prev = head;
@@ -487,7 +502,7 @@ try_again:
     // so that cur is properly marked as hazard.
     if (prev->get_next() != cur) goto try_again;
 
-    if (nullptr == cur || (regular && cur->IsDummy())) {
+    if (nullptr == cur) {
       *prev_ptr = prev;
       *cur_ptr = cur;
       return false;
@@ -540,7 +555,7 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
   Node* next;
   do {
     do {
-      if (!SearchNode(head, delete_node, &prev, &cur, true)) {
+      if (!SearchNode(head, delete_node, &prev, &cur)) {
         ClearHazardPointer();
         return false;
       }
@@ -558,7 +573,7 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
     reclaimer.ReclaimLater(cur, LockFreeHashTable<K, V, Hash>::OnDeleteNode);
     reclaimer.ReclaimNoHazardPointer();
   } else {
-    SearchNode(head, delete_node, &prev, &cur, true);
+    SearchNode(head, delete_node, &prev, &cur);
   }
 
   ClearHazardPointer();

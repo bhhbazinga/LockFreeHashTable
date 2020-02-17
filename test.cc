@@ -46,7 +46,7 @@ int main(int argc, char const* argv[]) {
     LockFreeHashTable<int, int, Hash> ht;
     std::vector<std::thread> threads;
     std::atomic<bool> start = false;
-    int n = 2;
+    int n = 5;
     for (int i = 0; i < 2; ++i) {
       threads.push_back(std::thread([&] {
         while (!start) {

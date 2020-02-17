@@ -7,7 +7,7 @@ Lock Free Resizable Hash Table Based On Split-Ordered Lists.
   * Support Multi-producer & Multi-consumer.
   * Use Hazard Pointer to manage memory.
   * FreeLock LinkedList base on Harris' ListBasedSet, see also [LockFreeLinkedList](https://github.com/bhhbazinga/LockFreeLinkedList)
-  * Resize in no wait way.
+  * Resize without waiting.
   
 ## Benchmark
 
@@ -35,9 +35,8 @@ bool Find(const K& key, V& value);
 bool Delete(const T& data);
 size_t size() const;
 ```
-
-##TODO List
-
+## TODO List
+- [] Shrink Hash Table without waiting.
 
 ## Reference
 [1]A Pragmatic Implementation of Non-BlockingLinked-Lists. Timothy L.Harris\

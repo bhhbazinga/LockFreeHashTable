@@ -6,11 +6,6 @@
 #include <cmath>
 #include <cstdio>
 
-#define LOG(fmt, ...)                  \
-  do {                                 \
-    fprintf(stderr, fmt, __VA_ARGS__); \
-  } while (0)
-
 #include "reclaimer.h"
 
 // Total bucket size equals to kSegmentSize^kMaxLevel, in this case the total
@@ -54,15 +49,6 @@ class LockFreeHashTable {
   }
 
   ~LockFreeHashTable() {}
-
-  void Dump() {
-    Node* p = GetBucketHeadByIndex(0);
-    while (p) {
-      LOG("%p,dummy=%d,hash=%lu,-->", p, p->IsDummy(), p->hash);
-      p = p->next;
-    }
-    LOG("%s", "\n");
-  }
 
   bool Insert(const K& key, const V& value) {
     RegularNode* new_node = new RegularNode(key, value, hash_func_);
@@ -260,11 +246,6 @@ class LockFreeHashTable {
       return Reverse(hash | 0x8000000000000000);
     }
     HashKey DummyKey(HashKey hash) const { return Reverse(hash); }
-
-    void Dump() const {
-      LOG("%p,is_dummy=%d,hash=%lu,reverse_hash=%lu,\n", this, IsDummy(), hash,
-          reverse_hash);
-    }
 
     virtual bool IsDummy() const { return (reverse_hash & 0x1) == 0; }
     Node* get_next() const { return next.load(std::memory_order_acquire); }

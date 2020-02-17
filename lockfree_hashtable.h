@@ -4,7 +4,6 @@
 #include <atomic>
 #include <cassert>
 #include <cmath>
-#include <cstdio>
 
 #include "reclaimer.h"
 
@@ -14,6 +13,7 @@
 // following two values according to your memory size.
 const int kMaxLevel = 4;
 const int kSegmentSize = 64;
+const size_t kMaxBucketSize = pow(kSegmentSize, kMaxLevel);
 
 // Hash Table can be stored 2^power_of_2_ * kLoadFactor items.
 const float kLoadFactor = 0.5;
@@ -90,11 +90,12 @@ class LockFreeHashTable {
   };
 
   size_t size() const { return size_.load(std::memory_order_consume); }
+
+ private:
   size_t bucket_size() const {
     return 1 << power_of_2_.load(std::memory_order_consume);
   }
 
- private:
   Segment* NewSegments(int level) {
     Segment* segments = new Segment[kSegmentSize];
     for (int i = 0; i < kSegmentSize; ++i) {
@@ -284,7 +285,8 @@ class LockFreeHashTable {
 
     ~RegularNode() override {
       V* ptr = value.load(std::memory_order_consume);
-      delete ptr;
+      if (ptr != nullptr)
+        delete ptr;  // If update a node, value of this node is nullptr.
     }
 
     bool IsDummy() const override { return false; }
@@ -306,14 +308,20 @@ class LockFreeHashTable {
     }
 
     ~Segment() {
-      // void* ptr = data.load(std::memory_order_consume);
-      // if (nullptr == ptr) return;
+      void* ptr = data.load(std::memory_order_consume);
+      if (nullptr == ptr) return;
 
-      // if (level == kMaxLevel) {
-      //   delete[] static_cast<Bucket*>(ptr);
-      // } else {
-      //   delete static_cast<Segment*>(ptr);
-      // }
+      if (level == kMaxLevel - 1) {
+        Bucket* buckets = static_cast<Bucket*>(ptr);
+        for (int i = 0; i < kSegmentSize; ++i) {
+          DummyNode* head = buckets[i].load(std::memory_order_consume);
+          if (head != nullptr) delete head;
+        }
+        delete[] buckets;
+      } else {
+        Segment* sub_segments = static_cast<Segment*>(ptr);
+        delete[] sub_segments;
+      }
     }
 
     int level;                // Level of segment.
@@ -467,8 +475,12 @@ bool LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
   size_t size = size_.fetch_add(1, std::memory_order_release) + 1;
   size_t power = power_of_2_.load(std::memory_order_consume);
   if ((1 << power) * kLoadFactor < size) {
-    power_of_2_.compare_exchange_strong(power, power + 1,
-                                        std::memory_order_release);
+    if (power_of_2_.compare_exchange_strong(power, power + 1,
+                                            std::memory_order_release)) {
+      assert(bucket_size() <=
+             kMaxBucketSize);  // Out of memory or you can change the kMaxLevel
+                               // and kSegmentSize.
+    }
   }
   return true;
 }
@@ -553,7 +565,8 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
                                             std::memory_order_release,
                                             std::memory_order_relaxed));
 
-  if (prev->next.compare_exchange_strong(cur, next, std::memory_order_release)) {
+  if (prev->next.compare_exchange_strong(cur, next,
+                                         std::memory_order_release)) {
     size_.fetch_sub(1, std::memory_order_release);
     Reclaimer& reclaimer = Reclaimer::GetInstance();
     reclaimer.ReclaimLater(cur, LockFreeHashTable<K, V, Hash>::OnDeleteNode);

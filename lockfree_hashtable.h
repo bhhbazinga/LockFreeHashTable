@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 
 #define LOG(fmt, ...)                  \
@@ -63,29 +64,29 @@ class LockFreeHashTable {
     LOG("%s", "\n");
   }
 
-  void Insert(const K& key, const V& value) {
+  bool Insert(const K& key, const V& value) {
     RegularNode* new_node = new RegularNode(key, value, hash_func_);
     DummyNode* head = GetBucketHeadByHash(new_node->hash);
-    InsertRegularNode(head, new_node);
+    return InsertRegularNode(head, new_node);
   }
 
-  void Insert(K&& key, const V& value) {
+  bool Insert(K&& key, const V& value) {
     RegularNode* new_node = new RegularNode(std::move(key), value, hash_func_);
     DummyNode* head = GetBucketHeadByHash(new_node->hash);
-    InsertRegularNode(head, new_node);
+    return InsertRegularNode(head, new_node);
   }
 
-  void Insert(const K& key, V&& value) {
+  bool Insert(const K& key, V&& value) {
     RegularNode* new_node = new RegularNode(key, std::move(value), hash_func_);
     DummyNode* head = GetBucketHeadByHash(new_node->hash);
-    InsertRegularNode(head, new_node);
+    return InsertRegularNode(head, new_node);
   }
 
-  void Insert(K&& key, V&& value) {
+  bool Insert(K&& key, V&& value) {
     RegularNode* new_node =
         new RegularNode(std::move(key), std::move(value), hash_func_);
     DummyNode* head = GetBucketHeadByHash(new_node->hash);
-    InsertRegularNode(head, new_node);
+    return InsertRegularNode(head, new_node);
   }
 
   bool Delete(const K& key) {
@@ -102,9 +103,9 @@ class LockFreeHashTable {
     return FindNode(head, &find_node, value);
   };
 
-  size_t size() const { return size_.load(std::memory_order_acquire); }
+  size_t size() const { return size_.load(std::memory_order_consume); }
   size_t bucket_size() const {
-    return 1 << power_of_2_.load(std::memory_order_acquire);
+    return 1 << power_of_2_.load(std::memory_order_consume);
   }
 
  private:
@@ -156,7 +157,7 @@ class LockFreeHashTable {
 
   // Harris' OrderedListBasedset with Michael's hazard pointer to manage memory,
   // See also https://github.com/bhhbazinga/LockFreeLinkedList.
-  void InsertRegularNode(DummyNode* head, RegularNode* new_node);
+  bool InsertRegularNode(DummyNode* head, RegularNode* new_node);
   bool InsertDummyNode(DummyNode* head, DummyNode* new_node,
                        DummyNode** real_head);
   bool DeleteNode(DummyNode* head, Node* delete_node);
@@ -164,9 +165,23 @@ class LockFreeHashTable {
     Node* prev;
     Node* cur;
     bool found = SearchNode(head, find_node, &prev, &cur);
+    Reclaimer& reclaimer = Reclaimer::GetInstance();
     if (found) {
-      value = *static_cast<RegularNode*>(cur)->value.load(
-          std::memory_order_acquire);
+      V* value_ptr;
+      V* temp;
+      do {
+        // When find and insert concurrently value may be deleted,
+        // see InsertRegularNode, so value must be marked as hazard.
+        value_ptr = static_cast<RegularNode*>(cur)->value.load(
+            std::memory_order_consume);
+        temp = value_ptr;
+        reclaimer.MarkHazard(2, value_ptr);
+        value_ptr = static_cast<RegularNode*>(cur)->value.load(
+            std::memory_order_consume);
+      } while (temp != value_ptr);
+      reclaimer.MarkHazard(2, nullptr);
+      reclaimer.ReclaimNoHazardPointer();
+      value = *value_ptr;
     }
     ClearHazardPointer();
     return found;
@@ -184,8 +199,7 @@ class LockFreeHashTable {
     }
 
     if (node1->IsDummy() || node2->IsDummy()) {
-      // When initialize bucket currently, that could happen.
-      assert(node1->IsDummy() && node2->IsDummy());
+      // When initialize bucket concurrently, that could happen.
       return false;
     }
 
@@ -288,7 +302,7 @@ class LockFreeHashTable {
         : Node(hash_func(key_), false), key(key_), value(nullptr) {}
 
     ~RegularNode() override {
-      V* ptr = value.load(std::memory_order_acquire);
+      V* ptr = value.load(std::memory_order_consume);
       delete ptr;
     }
 
@@ -303,15 +317,15 @@ class LockFreeHashTable {
     explicit Segment(int level_) : level(level_), data(nullptr) {}
 
     Bucket* get_sub_buckets() const {
-      return static_cast<Bucket*>(data.load(std::memory_order_acquire));
+      return static_cast<Bucket*>(data.load(std::memory_order_consume));
     }
 
     Segment* get_sub_segments() const {
-      return static_cast<Segment*>(data.load(std::memory_order_acquire));
+      return static_cast<Segment*>(data.load(std::memory_order_consume));
     }
 
     ~Segment() {
-      // void* ptr = data.load(std::memory_order_acquire);
+      // void* ptr = data.load(std::memory_order_consume);
       // if (nullptr == ptr) return;
 
       // if (level == kMaxLevel) {
@@ -352,11 +366,12 @@ LockFreeHashTable<K, V, Hash>::InitializeBucket(BucketIndex bucket_index) {
   }
 
   int level = 1;
-  SegmentIndex segment_index = bucket_index;
   Segment* segments = segments_;  // Point to current segment.
   while (level++ <= kMaxLevel - 2) {
-    segment_index /= kSegmentSize;
-    Segment& cur_segment = segments[segment_index];
+    Segment& cur_segment =
+        segments[(bucket_index / static_cast<SegmentIndex>(pow(
+                                     kSegmentSize, kMaxLevel - level + 1))) %
+                 kSegmentSize];
     Segment* sub_segments = cur_segment.get_sub_segments();
     if (nullptr == sub_segments) {
       // Try allocate segments.
@@ -371,8 +386,7 @@ LockFreeHashTable<K, V, Hash>::InitializeBucket(BucketIndex bucket_index) {
     segments = sub_segments;
   }
 
-  segment_index /= kSegmentSize;
-  Segment& cur_segment = segments[segment_index];
+  Segment& cur_segment = segments[(bucket_index / kSegmentSize) % kSegmentSize];
   Bucket* buckets = cur_segment.get_sub_buckets();
   if (nullptr == buckets) {
     // Try allocate buckets.
@@ -386,20 +400,16 @@ LockFreeHashTable<K, V, Hash>::InitializeBucket(BucketIndex bucket_index) {
   }
 
   Bucket& bucket = buckets[bucket_index % kSegmentSize];
-  DummyNode* head = bucket.load(std::memory_order_acquire);
+  DummyNode* head = bucket.load(std::memory_order_consume);
   if (nullptr == head) {
     // Try allocate dummy head.
     head = new DummyNode(bucket_index);
     DummyNode* real_head;  // If insert failed, real_head is the head of bucket.
-    assert((parent_head->reverse_hash & 0x1) == 0);
     if (InsertDummyNode(parent_head, head, &real_head)) {
       // Dummy head must be inserted into the list before storing into bucket.
-      assert(bucket.load(std::memory_order_acquire) == nullptr);
       bucket.store(head, std::memory_order_release);
     } else {
       delete head;
-      assert((real_head->reverse_hash & 0x1) == 0);
-      assert(bucket_index == real_head->hash);
       head = real_head;
     }
   }
@@ -410,20 +420,22 @@ template <typename K, typename V, typename Hash>
 typename LockFreeHashTable<K, V, Hash>::DummyNode*
 LockFreeHashTable<K, V, Hash>::GetBucketHeadByIndex(BucketIndex bucket_index) {
   int level = 1;
-  SegmentIndex segment_index = bucket_index;
   const Segment* segments = segments_;
   while (level++ <= kMaxLevel - 2) {
-    segment_index /= kSegmentSize;
-    segments = segments[segment_index].get_sub_segments();
+    segments =
+        segments[(bucket_index / static_cast<SegmentIndex>(pow(
+                                     kSegmentSize, kMaxLevel - level + 1))) %
+                 kSegmentSize]
+            .get_sub_segments();
     if (nullptr == segments) return nullptr;
   }
 
-  segment_index /= kSegmentSize;
-  Bucket* buckets = segments[segment_index].get_sub_buckets();
+  Bucket* buckets =
+      segments[(bucket_index / kSegmentSize) % kSegmentSize].get_sub_buckets();
   if (nullptr == buckets) return nullptr;
 
   Bucket& bucket = buckets[bucket_index % kSegmentSize];
-  return bucket.load(std::memory_order_acquire);
+  return bucket.load(std::memory_order_consume);
 }
 
 template <typename K, typename V, typename Hash>
@@ -435,55 +447,49 @@ bool LockFreeHashTable<K, V, Hash>::InsertDummyNode(DummyNode* parent_head,
   do {
     if (SearchNode(parent_head, new_head, &prev, &cur)) {
       // The head of bucket already insert into list.
-      assert((cur->reverse_hash & 0x1) == 0);
       *real_head = static_cast<DummyNode*>(cur);
       ClearHazardPointer();
       return false;
     }
     new_head->next.store(cur, std::memory_order_release);
   } while (!prev->next.compare_exchange_weak(
-      cur, new_head, std::memory_order_release, std::memory_order_acquire));
+      cur, new_head, std::memory_order_release, std::memory_order_relaxed));
   ClearHazardPointer();
   return true;
 }
 
+// Insert regular node into hash table, if its key is already exists in
+// hash table then update it and return false else return true.
 template <typename K, typename V, typename Hash>
-void LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
+bool LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
                                                       RegularNode* new_node) {
   Node* prev;
   Node* cur;
-  assert((head->reverse_hash & 0x1) == 0);
+  Reclaimer& reclaimer = Reclaimer::GetInstance();
   do {
     if (SearchNode(head, new_node, &prev, &cur)) {
-      assert(!(new_node->reverse_hash & 0x1) == 0);
-      assert(!(cur->reverse_hash & 0x1) == 0);
-      V* new_value = new_node->value.load(std::memory_order_acquire);
+      V* new_value = new_node->value.load(std::memory_order_consume);
       V* old_value = static_cast<RegularNode*>(cur)->value.exchange(
           new_value, std::memory_order_release);
-      delete old_value;
+      reclaimer.ReclaimLater(old_value,
+                             [](void* ptr) { delete static_cast<V*>(ptr); });
       new_node->value.store(nullptr, std::memory_order_release);
       delete new_node;
       ClearHazardPointer();
-      return;
+      return false;
     }
     new_node->next.store(cur, std::memory_order_release);
   } while (!prev->next.compare_exchange_weak(
-      cur, new_node, std::memory_order_release, std::memory_order_acquire));
+      cur, new_node, std::memory_order_release, std::memory_order_relaxed));
   ClearHazardPointer();
 
-  if (size_ == 5) {
-    head->Dump();
-    new_node->Dump();
-    Dump();
-    assert(false);
-  }
-
   size_t size = size_.fetch_add(1, std::memory_order_release) + 1;
-  size_t power = power_of_2_.load(std::memory_order_acquire);
+  size_t power = power_of_2_.load(std::memory_order_consume);
   if ((1 << power) * kLoadFactor < size) {
     power_of_2_.compare_exchange_strong(power, power + 1,
                                         std::memory_order_release);
   }
+  return true;
 }
 
 template <typename K, typename V, typename Hash>
@@ -564,10 +570,9 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
     // Logically delete cur by marking cur->next.
   } while (!cur->next.compare_exchange_weak(next, get_marked_reference(next),
                                             std::memory_order_release,
-                                            std::memory_order_acquire));
+                                            std::memory_order_relaxed));
 
-  if (prev->next.compare_exchange_strong(cur, next, std::memory_order_release,
-                                         std::memory_order_acquire)) {
+  if (prev->next.compare_exchange_strong(cur, next, std::memory_order_release)) {
     size_.fetch_sub(1, std::memory_order_release);
     Reclaimer& reclaimer = Reclaimer::GetInstance();
     reclaimer.ReclaimLater(cur, LockFreeHashTable<K, V, Hash>::OnDeleteNode);

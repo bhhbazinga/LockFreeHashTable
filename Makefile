@@ -1,6 +1,7 @@
 CXX = g++
-CXXFLAGS = -Wall -Wextra -pedantic -std=c++2a -g -fsanitize=address
-
+CXXFLAGS = -Wall -Wextra -pedantic -std=c++2a -g -fsanitize=thread
+#-fsanitize=address -fsanitize=leak
+#-fsanitize=thread
 EXEC = test
 
 all: $(EXEC)

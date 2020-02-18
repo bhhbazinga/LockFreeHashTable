@@ -5,7 +5,7 @@
 #include <cassert>
 #include <cmath>
 
-#include "reclaimer.h"
+#include "HazardPointer/reclaimer.h"
 
 // Total bucket size equals to kSegmentSize^kMaxLevel, in this case the total
 // bucket size is 64^4. If the load factor is 0.5, the maximum number of
@@ -152,7 +152,7 @@ class LockFreeHashTable {
     Node* prev;
     Node* cur;
     bool found = SearchNode(head, find_node, &prev, &cur);
-    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
     if (found) {
       V* value_ptr;
       V* temp;
@@ -220,7 +220,7 @@ class LockFreeHashTable {
   // After invoke Search, we should clear hazard pointer,
   // invoke ClearHazardPointer after Insert and Delete.
   void ClearHazardPointer() {
-    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
     reclaimer.MarkHazard(0, nullptr);
     reclaimer.MarkHazard(1, nullptr);
   }
@@ -329,11 +329,12 @@ class LockFreeHashTable {
                               // buckets else data point to segments.
   };
 
-  std::atomic<size_t> power_of_2_;   // bucket size == 2^power_of_2_
-  std::atomic<size_t> size_;         // item size
-  Hash hash_func_;                   // hash function
-  Segment segments_[kSegmentSize];   // top level sengments
-  static size_t reverse8bits_[256];  // lookup table for reverse bits quickly
+  std::atomic<size_t> power_of_2_;   // Bucket size == 2^power_of_2_.
+  std::atomic<size_t> size_;         // Item size.
+  Hash hash_func_;                   // Hash function.
+  Segment segments_[kSegmentSize];   // Top level sengments.
+  static size_t reverse8bits_[256];  // Lookup table for reverse bits quickly.
+  HazardPointerList hazard_pointer_list_;  // For controlling gc.
 };
 
 // Fast reverse bits using Lookup Table.
@@ -454,7 +455,7 @@ bool LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
                                                       RegularNode* new_node) {
   Node* prev;
   Node* cur;
-  Reclaimer& reclaimer = Reclaimer::GetInstance();
+  Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
   do {
     if (SearchNode(head, new_node, &prev, &cur)) {
       V* new_value = new_node->value.load(std::memory_order_consume);
@@ -490,7 +491,7 @@ bool LockFreeHashTable<K, V, Hash>::SearchNode(DummyNode* head,
                                                Node* search_node,
                                                Node** prev_ptr,
                                                Node** cur_ptr) {
-  Reclaimer& reclaimer = Reclaimer::GetInstance();
+  Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
 try_again:
   Node* prev = head;
   Node* cur = prev->get_next();
@@ -568,7 +569,7 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
   if (prev->next.compare_exchange_strong(cur, next,
                                          std::memory_order_release)) {
     size_.fetch_sub(1, std::memory_order_release);
-    Reclaimer& reclaimer = Reclaimer::GetInstance();
+    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
     reclaimer.ReclaimLater(cur, LockFreeHashTable<K, V, Hash>::OnDeleteNode);
     reclaimer.ReclaimNoHazardPointer();
   } else {

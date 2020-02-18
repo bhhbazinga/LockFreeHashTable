@@ -20,6 +20,9 @@ const float kLoadFactor = 0.5;
 
 template <typename K, typename V, typename Hash = std::hash<K>>
 class LockFreeHashTable {
+  static_assert(std::is_copy_constructible_v<K>, "K requires copy constructor");
+  static_assert(std::is_copy_constructible_v<V>, "V requires copy constructor");
+
   struct Node;
   struct DummyNode;
   struct RegularNode;

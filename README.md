@@ -1,7 +1,6 @@
 # LockFreeHashTable
 Lock Free Resizable Hash Table Based On Split-Ordered Lists.
 ## Feature
-  * C++20 implementation.
   * Thread-safe and Lock-free.
   * ABA safe.
   * Support Multi-producer & Multi-consumer.

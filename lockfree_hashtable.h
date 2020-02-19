@@ -7,7 +7,7 @@
 
 #include "HazardPointer/reclaimer.h"
 
-// Total bucket size equals to kSegmentSize^kMaxLevel, in this case the total
+// The maximum bucket size equals to kSegmentSize^kMaxLevel, in this case the maximum
 // bucket size is 64^4. If the load factor is 0.5, the maximum number of
 // items that Hash Table contains is 64^4 * 0.5 = 2^23. You can adjust the
 // following two values according to your memory size.

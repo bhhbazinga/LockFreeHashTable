@@ -5,10 +5,10 @@ Lock Free Resizable Hash Table Based On Split-Ordered Lists.
   * ABA safe.
   * Support Multi-producer & Multi-consumer.
   * Use Hazard Pointer to manage memory.
-  * FreeLock LinkedList base on Harris' ListBasedSet, see also [LockFreeLinkedList](https://github.com/bhhbazinga/LockFreeLinkedList)
+  * Lock Free LinkedList base on Harris' ListBasedSet, see also [LockFreeLinkedList](https://github.com/bhhbazinga/LockFreeLinkedList)
   * Resize without waiting.
 ## Benchmark
-  Magnitude     | Insert      | Find       | Delete     | Insert & Delete|
+  Magnitude     | Insert      | Find       | Delete     | Insert&Find&Delete|
   :-----------  | :-----------| :----------|:-----------| :-----------------
   10K           | 7.8ms       | 1.6ms      | 2.1ms      | 10.4ms
   100K          | 74.9ms      | 13.4ms     | 18.4ms     | 111.2ms

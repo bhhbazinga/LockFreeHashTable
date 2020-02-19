@@ -51,6 +51,11 @@ class LockFreeHashTable {
     buckets[0].store(head, std::memory_order_release);
   }
 
+  LockFreeHashTable(const LockFreeHashTable& other) = delete;
+  LockFreeHashTable(LockFreeHashTable&& other) = delete;
+  LockFreeHashTable& operator=(const LockFreeHashTable& other) = delete;
+  LockFreeHashTable& operator=(LockFreeHashTable&& other) = delete;
+
   ~LockFreeHashTable() {}
 
   bool Insert(const K& key, const V& value) {

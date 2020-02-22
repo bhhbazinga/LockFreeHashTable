@@ -7,8 +7,8 @@
 
 #include "HazardPointer/reclaimer.h"
 
-// The maximum bucket size equals to kSegmentSize^kMaxLevel, in this case the maximum
-// bucket size is 64^4. If the load factor is 0.5, the maximum number of
+// The maximum bucket size equals to kSegmentSize^kMaxLevel, in this case the
+// maximum bucket size is 64^4. If the load factor is 0.5, the maximum number of
 // items that Hash Table contains is 64^4 * 0.5 = 2^23. You can adjust the
 // following two values according to your memory size.
 const int kMaxLevel = 4;
@@ -18,10 +18,14 @@ const size_t kMaxBucketSize = pow(kSegmentSize, kMaxLevel);
 // Hash Table can be stored 2^power_of_2_ * kLoadFactor items.
 const float kLoadFactor = 0.5;
 
+template <typename K, typename V>
+class TableReclaimer;
+
 template <typename K, typename V, typename Hash = std::hash<K>>
 class LockFreeHashTable {
   static_assert(std::is_copy_constructible_v<K>, "K requires copy constructor");
   static_assert(std::is_copy_constructible_v<V>, "V requires copy constructor");
+  friend TableReclaimer<K, V>;
 
   struct Node;
   struct DummyNode;
@@ -159,8 +163,9 @@ class LockFreeHashTable {
   bool FindNode(DummyNode* head, RegularNode* find_node, V& value) {
     Node* prev;
     Node* cur;
-    bool found = SearchNode(head, find_node, &prev, &cur);
-    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
+    HazardPointer prev_hp, cur_hp;
+    bool found = SearchNode(head, find_node, &prev, &cur, prev_hp, cur_hp);
+    auto& reclaimer = TableReclaimer<K, V>::GetInstance();
     if (found) {
       V* value_ptr;
       V* temp;
@@ -170,22 +175,20 @@ class LockFreeHashTable {
         value_ptr = static_cast<RegularNode*>(cur)->value.load(
             std::memory_order_consume);
         temp = value_ptr;
-        reclaimer.MarkHazard(2, value_ptr);
         value_ptr = static_cast<RegularNode*>(cur)->value.load(
             std::memory_order_consume);
       } while (temp != value_ptr);
-      reclaimer.MarkHazard(2, nullptr);
       reclaimer.ReclaimNoHazardPointer();
       value = *value_ptr;
     }
-    ClearHazardPointer();
     return found;
   }
 
   // Traverse list begin with head until encounter nullptr or the first node
   // which is greater than or equals to the given search_node.
   bool SearchNode(DummyNode* head, Node* search_node, Node** prev_ptr,
-                  Node** cur_ptr);
+                  Node** cur_ptr, HazardPointer& prev_hp,
+                  HazardPointer& cur_hp);
 
   // Compare two nodes according to their reverse_hash and the key.
   bool Less(Node* node1, Node* node2) const {
@@ -224,14 +227,6 @@ class LockFreeHashTable {
   }
 
   static void OnDeleteNode(void* ptr) { delete static_cast<Node*>(ptr); }
-
-  // After invoke Search, we should clear hazard pointer,
-  // invoke ClearHazardPointer after Insert and Delete.
-  void ClearHazardPointer() {
-    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
-    reclaimer.MarkHazard(0, nullptr);
-    reclaimer.MarkHazard(1, nullptr);
-  }
 
   struct Node {
     Node(HashKey hash_, bool dummy)
@@ -342,7 +337,25 @@ class LockFreeHashTable {
   Hash hash_func_;                   // Hash function.
   Segment segments_[kSegmentSize];   // Top level sengments.
   static size_t reverse8bits_[256];  // Lookup table for reverse bits quickly.
-  HazardPointerList hazard_pointer_list_;  // For controlling gc.
+  static Reclaimer::HazardPointerList global_hp_list_;
+};
+
+template <typename K, typename V, typename Hash>
+Reclaimer::HazardPointerList LockFreeHashTable<K, V, Hash>::global_hp_list_;
+
+template <typename K, typename V>
+class TableReclaimer : public Reclaimer {
+  friend LockFreeHashTable<K, V>;
+
+ private:
+  TableReclaimer(HazardPointerList& hp_list) : Reclaimer(hp_list) {}
+  ~TableReclaimer() override = default;
+
+  static TableReclaimer<K, V>& GetInstance() {
+    thread_local static TableReclaimer reclaimer(
+        LockFreeHashTable<K, V>::global_hp_list_);
+    return reclaimer;
+  }
 };
 
 // Fast reverse bits using Lookup Table.
@@ -442,17 +455,16 @@ bool LockFreeHashTable<K, V, Hash>::InsertDummyNode(DummyNode* parent_head,
                                                     DummyNode** real_head) {
   Node* prev;
   Node* cur;
+  HazardPointer prev_hp, cur_hp;
   do {
-    if (SearchNode(parent_head, new_head, &prev, &cur)) {
+    if (SearchNode(parent_head, new_head, &prev, &cur, prev_hp, cur_hp)) {
       // The head of bucket already insert into list.
       *real_head = static_cast<DummyNode*>(cur);
-      ClearHazardPointer();
       return false;
     }
     new_head->next.store(cur, std::memory_order_release);
   } while (!prev->next.compare_exchange_weak(
       cur, new_head, std::memory_order_release, std::memory_order_relaxed));
-  ClearHazardPointer();
   return true;
 }
 
@@ -463,9 +475,10 @@ bool LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
                                                       RegularNode* new_node) {
   Node* prev;
   Node* cur;
-  Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
+  HazardPointer prev_hp, cur_hp;
+  auto& reclaimer = TableReclaimer<K, V>::GetInstance();
   do {
-    if (SearchNode(head, new_node, &prev, &cur)) {
+    if (SearchNode(head, new_node, &prev, &cur, prev_hp, cur_hp)) {
       V* new_value = new_node->value.load(std::memory_order_consume);
       V* old_value = static_cast<RegularNode*>(cur)->value.exchange(
           new_value, std::memory_order_release);
@@ -473,13 +486,11 @@ bool LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
                              [](void* ptr) { delete static_cast<V*>(ptr); });
       new_node->value.store(nullptr, std::memory_order_release);
       delete new_node;
-      ClearHazardPointer();
       return false;
     }
     new_node->next.store(cur, std::memory_order_release);
   } while (!prev->next.compare_exchange_weak(
       cur, new_node, std::memory_order_release, std::memory_order_relaxed));
-  ClearHazardPointer();
 
   size_t size = size_.fetch_add(1, std::memory_order_release) + 1;
   size_t power = power_of_2_.load(std::memory_order_consume);
@@ -497,15 +508,17 @@ bool LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
 template <typename K, typename V, typename Hash>
 bool LockFreeHashTable<K, V, Hash>::SearchNode(DummyNode* head,
                                                Node* search_node,
-                                               Node** prev_ptr,
-                                               Node** cur_ptr) {
-  Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
+                                               Node** prev_ptr, Node** cur_ptr,
+                                               HazardPointer& prev_hp,
+                                               HazardPointer& cur_hp) {
+  auto& reclaimer = TableReclaimer<K, V>::GetInstance();
 try_again:
   Node* prev = head;
   Node* cur = prev->get_next();
   Node* next;
   while (true) {
-    reclaimer.MarkHazard(0, cur);
+    cur_hp.UnMark();
+    cur_hp = HazardPointer(&reclaimer, cur);
     // Make sure prev is the predecessor of cur,
     // so that cur is properly marked as hazard.
     if (prev->get_next() != cur) goto try_again;
@@ -536,15 +549,11 @@ try_again:
         *cur_ptr = cur;
         return Equals(cur, search_node);
       }
-      // swap two hazard pointers,
-      // at this point, hp0 point to cur, hp1 point to prev
-      void* hp0 = reclaimer.GetHazardPtr(0);
-      void* hp1 = reclaimer.GetHazardPtr(1);
-      reclaimer.MarkHazard(2, hp0);  // Temporarily save hp0.
-      reclaimer.MarkHazard(0, hp1);
-      reclaimer.MarkHazard(1, hp0);
-      reclaimer.MarkHazard(2, nullptr);
-      // at this point, hp0 point to prev, hp1 point to cur
+
+      // Swap cur_hp and prev_hp.
+      HazardPointer tmp = std::move(cur_hp);
+      cur_hp = std::move(prev_hp);
+      prev_hp = std::move(tmp);
 
       prev = cur;
       cur = next;
@@ -561,10 +570,10 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
   Node* prev;
   Node* cur;
   Node* next;
+  HazardPointer prev_hp, cur_hp;
   do {
     do {
-      if (!SearchNode(head, delete_node, &prev, &cur)) {
-        ClearHazardPointer();
+      if (!SearchNode(head, delete_node, &prev, &cur, prev_hp, cur_hp)) {
         return false;
       }
       next = cur->get_next();
@@ -577,14 +586,15 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
   if (prev->next.compare_exchange_strong(cur, next,
                                          std::memory_order_release)) {
     size_.fetch_sub(1, std::memory_order_release);
-    Reclaimer& reclaimer = Reclaimer::GetInstance(hazard_pointer_list_);
+    auto& reclaimer = TableReclaimer<K, V>::GetInstance();
     reclaimer.ReclaimLater(cur, LockFreeHashTable<K, V, Hash>::OnDeleteNode);
     reclaimer.ReclaimNoHazardPointer();
   } else {
-    SearchNode(head, delete_node, &prev, &cur);
+    prev_hp.UnMark();
+    cur_hp.UnMark();
+    SearchNode(head, delete_node, &prev, &cur, prev_hp, cur_hp);
   }
 
-  ClearHazardPointer();
   return true;
 }
 #endif  // LOCKFREE_HASHTABLE_H

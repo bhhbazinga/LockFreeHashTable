@@ -53,14 +53,22 @@ class LockFreeHashTable {
 
     DummyNode* head = new DummyNode(0);
     buckets[0].store(head, std::memory_order_release);
+    head_ = head;
+  }
+
+  ~LockFreeHashTable() {
+    Node* p = head_;
+    while (p != nullptr) {
+      Node* tmp = p;
+      p = p->next.load(std::memory_order_acquire);
+      tmp->Release();
+    }
   }
 
   LockFreeHashTable(const LockFreeHashTable& other) = delete;
   LockFreeHashTable(LockFreeHashTable&& other) = delete;
   LockFreeHashTable& operator=(const LockFreeHashTable& other) = delete;
   LockFreeHashTable& operator=(LockFreeHashTable&& other) = delete;
-
-  ~LockFreeHashTable() {}
 
   bool Insert(const K& key, const V& value) {
     RegularNode* new_node = new RegularNode(key, value, hash_func_);
@@ -101,11 +109,11 @@ class LockFreeHashTable {
     return FindNode(head, &find_node, value);
   };
 
-  size_t size() const { return size_.load(std::memory_order_consume); }
+  size_t size() const { return size_.load(std::memory_order_relaxed); }
 
  private:
   size_t bucket_size() const {
-    return 1 << power_of_2_.load(std::memory_order_consume);
+    return 1 << power_of_2_.load(std::memory_order_relaxed);
   }
 
   Segment* NewSegments(int level) {
@@ -234,6 +242,8 @@ class LockFreeHashTable {
           reverse_hash(dummy ? DummyKey(hash) : RegularKey(hash)),
           next(nullptr) {}
 
+    virtual void Release() = 0;
+
     virtual ~Node() {}
 
     HashKey Reverse(HashKey hash) const {
@@ -264,6 +274,8 @@ class LockFreeHashTable {
     DummyNode(BucketIndex bucket_index) : Node(bucket_index, true) {}
     ~DummyNode() override {}
 
+    void Release() override { delete this; }
+
     bool IsDummy() const override { return true; }
   };
 
@@ -292,6 +304,8 @@ class LockFreeHashTable {
         delete ptr;  // If update a node, value of this node is nullptr.
     }
 
+    void Release() override { delete this; }
+
     bool IsDummy() const override { return false; }
 
     const K key;
@@ -316,10 +330,6 @@ class LockFreeHashTable {
 
       if (level == kMaxLevel - 1) {
         Bucket* buckets = static_cast<Bucket*>(ptr);
-        for (int i = 0; i < kSegmentSize; ++i) {
-          DummyNode* head = buckets[i].load(std::memory_order_consume);
-          if (head != nullptr) delete head;
-        }
         delete[] buckets;
       } else {
         Segment* sub_segments = static_cast<Segment*>(ptr);
@@ -337,6 +347,7 @@ class LockFreeHashTable {
   Hash hash_func_;                   // Hash function.
   Segment segments_[kSegmentSize];   // Top level sengments.
   static size_t reverse8bits_[256];  // Lookup table for reverse bits quickly.
+  DummyNode* head_;                  // Head of linkedlist.
   static Reclaimer::HazardPointerList global_hp_list_;
 };
 
@@ -492,8 +503,8 @@ bool LockFreeHashTable<K, V, Hash>::InsertRegularNode(DummyNode* head,
   } while (!prev->next.compare_exchange_weak(
       cur, new_node, std::memory_order_release, std::memory_order_relaxed));
 
-  size_t size = size_.fetch_add(1, std::memory_order_release) + 1;
-  size_t power = power_of_2_.load(std::memory_order_consume);
+  size_t size = size_.fetch_add(1, std::memory_order_relaxed) + 1;
+  size_t power = power_of_2_.load(std::memory_order_relaxed);
   if ((1 << power) * kLoadFactor < size) {
     if (power_of_2_.compare_exchange_strong(power, power + 1,
                                             std::memory_order_release)) {
@@ -537,7 +548,7 @@ try_again:
 
       reclaimer.ReclaimLater(cur, LockFreeHashTable<K, V, Hash>::OnDeleteNode);
       reclaimer.ReclaimNoHazardPointer();
-      size_.fetch_sub(1, std::memory_order_release);
+      size_.fetch_sub(1, std::memory_order_relaxed);
       cur = get_unmarked_reference(next);
     } else {
       if (prev->get_next() != cur) goto try_again;
@@ -585,7 +596,7 @@ bool LockFreeHashTable<K, V, Hash>::DeleteNode(DummyNode* head,
 
   if (prev->next.compare_exchange_strong(cur, next,
                                          std::memory_order_release)) {
-    size_.fetch_sub(1, std::memory_order_release);
+    size_.fetch_sub(1, std::memory_order_relaxed);
     auto& reclaimer = TableReclaimer<K, V>::GetInstance();
     reclaimer.ReclaimLater(cur, LockFreeHashTable<K, V, Hash>::OnDeleteNode);
     reclaimer.ReclaimNoHazardPointer();

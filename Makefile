@@ -7,7 +7,7 @@ EXEC = test
 all: $(EXEC)
 
 $(EXEC):  test.cc lockfree_hashtable.h HazardPointer/reclaimer.h
-	$(CXX) $(CXXFLAGS) test.cc -o $@  
+	$(CXX) $(CXXFLAGS) test.cc -o $@ -lpthread 
 
 HazardPointer/reclaimer.h:
 	git submodule update --init

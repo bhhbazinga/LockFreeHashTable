@@ -154,7 +154,7 @@ class LockFreeHashTable {
   // Get the head node of bucket, if bucket not exist then initialize it and
   // return head.
   DummyNode* GetBucketHeadByHash(HashKey hash) {
-    BucketIndex bucket_index = hash % bucket_size();
+    BucketIndex bucket_index = (hash & (bucket_size() - 1));
     DummyNode* head = GetBucketHeadByIndex(bucket_index);
     if (nullptr == head) {
       head = InitializeBucket(bucket_index);

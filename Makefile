@@ -16,4 +16,4 @@ clean:
 	rm -rf  $(EXEC)
 
 .Phony:
-	clean 3rd
+	clean

@@ -40,7 +40,7 @@ void onFind(int divide) {
   int n = maxElements / divide;
   for (int i = 0; i < n; ++i) {
     int x;
-    ht.Find(rand(), x);
+    ht.Find(rand() % n, x);
   }
 }
 
